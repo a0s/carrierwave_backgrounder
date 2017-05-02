@@ -82,7 +82,11 @@ module CarrierWave
 
             def write_#{column}_identifier
               super and return if process_#{column}_upload
-	      self.#{column}_tmp = _mounter(:#{column}).cache_names.first if _mounter(:#{column}).cache_names.any?
+              if self.#{column}_tmp.is_a?(Array)
+                self.#{column}_tmp = _mounter(:#{column}).cache_names
+              else
+                self.#{column}_tmp = _mounter(:#{column}).cache_names.first if _mounter(:#{column}).cache_names.any?
+              end
             end
 
             def store_#{column}!
@@ -109,7 +113,12 @@ module CarrierWave
             end
 
             def enqueue_#{column}_background_job
-              CarrierWave::Backgrounder.enqueue_for_backend(#{worker}, self.class.name, id.to_s, #{column}.mounted_as)
+              if #{column}.is_a?(Array)
+                mounted_as = #{column}.first.mounted_as
+              else
+                mounted_as = #{column}.mounted_as
+              end
+              CarrierWave::Backgrounder.enqueue_for_backend(#{worker}, self.class.name, id.to_s, mounted_as)
             end
           RUBY
         end

@@ -22,27 +22,71 @@ module CarrierWave
       def perform(*args)
         record = super(*args)
 
-        if record && record.send(:"#{column}_tmp")
-          store_directories(record)
-          record.send :"process_#{column}_upload=", true
-          record.send :"#{column}_tmp=", nil
-          record.send :"#{column}_processing=", false if record.respond_to?(:"#{column}_processing")
-          open(cache_path) do |f|
-            record.send :"#{column}=", f
-          end
+        if record
+          if (asset_tmps = record.send(:"#{column}_tmp")).is_a?(Array)
+            images          = []
+            tmp_directories = []
+            cache_keys      = []
 
-          if record.save!
-            if is_fog?
-              # credential_keys = CarrierWave::Uploader::Base.fog_credentials
-              # bucket_name = CarrierWave::Uploader::Base.fog_directory
-              # client = Aws::S3::Client.new(
-              #             region:            credential_keys[:region],
-              #             access_key_id:     credential_keys[:aws_access_key_id],
-              #             secret_access_key: credential_keys[:aws_secret_access_key]
-              #           )
-              # client.delete_object(bucket: bucket_name, key: tmp_directory)
-            else
-              FileUtils.rm_r(tmp_directory, :force => true)
+            asset = constantized_resource.uploaders[:"#{column}"]
+            asset_tmps.each do |asset_tmp|
+              store_directories(asset, asset_tmp)
+              images << open(cache_path)
+              tmp_directories << tmp_directory
+              cache_keys << asset_tmp
+            end
+            record.send :"process_#{column}_upload=", true
+            record.send :"#{column}_tmp=", nil
+            record.send :"#{column}_processing=", false if record.respond_to?(:"#{column}_processing")
+            record.send :"#{column}=", images
+
+            if record.save!
+              case cache_storage_sym
+                when :fog
+                  # credential_keys = CarrierWave::Uploader::Base.fog_credentials
+                  # bucket_name = CarrierWave::Uploader::Base.fog_directory
+                  # client = Aws::S3::Client.new(
+                  #             region:            credential_keys[:region],
+                  #             access_key_id:     credential_keys[:aws_access_key_id],
+                  #             secret_access_key: credential_keys[:aws_secret_access_key]
+                  #           )
+                  # client.delete_object(bucket: bucket_name, key: tmp_directory)
+                when :file
+                  tmp_directories.each {|d| FileUtils.rm_r(d, :force => true)}
+                when :postgresql_lo
+                  tmp_directories.each {|d| FileUtils.rm_r(d, :force => true)}
+                  cache_keys.each {|cc| CarrierWave::Storage::PostgresqlLo::CacheFile.new.delete(cc)}
+              end
+            end
+
+          else
+            cache_key = record.send(:"#{column}_tmp")
+            store_directories(record.send(:"#{column}"),
+                              record.send(:"#{column}_tmp"))
+            record.send :"process_#{column}_upload=", true
+            record.send :"#{column}_tmp=", nil
+            record.send :"#{column}_processing=", false if record.respond_to?(:"#{column}_processing")
+            open(cache_path) do |f|
+              record.send :"#{column}=", f
+            end
+
+            if record.save!
+              case cache_storage_sym
+                when :fog
+                  # credential_keys = CarrierWave::Uploader::Base.fog_credentials
+                  # bucket_name = CarrierWave::Uploader::Base.fog_directory
+                  # client = Aws::S3::Client.new(
+                  #             region:            credential_keys[:region],
+                  #             access_key_id:     credential_keys[:aws_access_key_id],
+                  #             secret_access_key: credential_keys[:aws_secret_access_key]
+                  #           )
+                  # client.delete_object(bucket: bucket_name, key: tmp_directory)
+                when :file
+                  FileUtils.rm_r(tmp_directory, :force => true)
+                when :postgresql_lo
+                  FileUtils.rm_r(tmp_directory, :force => true)
+                  CarrierWave::Storage::PostgresqlLo::CacheFile.new.delete(cache_key)
+              end
             end
           end
         else
@@ -52,24 +96,35 @@ module CarrierWave
 
       private
 
-      def store_directories(record)
-        asset, asset_tmp = record.send(:"#{column}"), record.send(:"#{column}_tmp")
-        if is_fog?
-          cache_url = "http://#{CarrierWave::Uploader::Base.fog_directory}.s3.amazonaws.com"
-          @cache_path = "#{cache_url}/#{asset.cache_dir}/#{asset_tmp}"
-          @tmp_directory = "#{asset.cache_dir}/#{asset_tmp}"
-        else
-          cache_directory  = File.expand_path(asset.cache_dir, asset.root)
-          @cache_path      = File.join(cache_directory, asset_tmp)
-          @tmp_directory   = File.join(cache_directory, asset_tmp.split("/").first)
-        end
+      def cache_storage_sym
+        cache_storage =  CarrierWave::Uploader::Base.cache_storage.name
+        storage_engines = CarrierWave::Uploader::Base.storage_engines
+        name = storage_engines.invert[cache_storage]
+        fail("Unknown cache storage engine #{cache_storage}") unless name
+        name
       end
 
-      def is_fog?
-        if CarrierWave::Uploader::Base.cache_storage == CarrierWave::Storage::Fog
-          true
-        elsif CarrierWave::Uploader::Base.cache_storage == CarrierWave::Storage::File
-          false
+      def store_directories(asset, asset_tmp)
+        case cache_storage_sym
+          when :fog
+            cache_url = "http://#{CarrierWave::Uploader::Base.fog_directory}.s3.amazonaws.com"
+            @cache_path = "#{cache_url}/#{asset.cache_dir}/#{asset_tmp}"
+            @tmp_directory = "#{asset.cache_dir}/#{asset_tmp}"
+
+          when :file
+            cache_directory  = File.expand_path(asset.cache_dir, asset.root.is_a?(Proc) ? asset.root.call : asset.root)
+            @cache_path      = File.join(cache_directory, asset_tmp)
+            @tmp_directory   = File.join(cache_directory, asset_tmp.split("/").first)
+
+          when :postgresql_lo
+            cache_directory  = File.expand_path(asset.cache_dir, asset.root.is_a?(Proc) ? asset.root.call : asset.root)
+            @cache_path      = File.join(cache_directory, asset_tmp)
+            @tmp_directory   = File.join(cache_directory, asset_tmp.split("/").first)
+
+            cf = CarrierWave::Storage::PostgresqlLo::CacheFile.new
+            FileUtils.mkdir_p(@tmp_directory)
+            content = cf.read(asset_tmp)
+            ::File.open(@cache_path, 'wb') {|io| io.write(content)}
         end
       end
 
